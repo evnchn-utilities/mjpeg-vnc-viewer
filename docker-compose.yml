@@ -1,0 +1,8 @@
+services:
+  mjpeg-vnc-viewer:
+    build: .
+    ports:
+      - "${PORT:-8888}:${PORT:-8888}"
+    env_file:
+      - .env
+    restart: unless-stopped
