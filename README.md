@@ -1,6 +1,6 @@
-# Apple TV 3 VNC Viewer
+# Apple TV 3 VNC Viewer — 2×2 Grid
 
-Stream a remote Linux desktop (via VNC) to a jailbroken Apple TV 3 running Kodi, using an MJPEG relay server.
+Stream up to 4 remote Linux desktops (via VNC) to a jailbroken Apple TV 3 running Kodi, composited into a single 2×2 MJPEG grid.
 
 ## Device Details
 
@@ -19,32 +19,35 @@ Stream a remote Linux desktop (via VNC) to a jailbroken Apple TV 3 running Kodi,
 ## Architecture
 
 ```
-┌───────────────────────────────────┐
-│  LXC Host (192.168.50.180)        │
-│                                   │
-│  ┌─────────────┐  VNC (localhost) │         MJPEG stream          ┌───────────────────┐
-│  │  x11vnc     │ ───────────────▶ │  ──────────────────────────▶  │  Apple TV 3       │
-│  │  :5900      │                  │  http://192.168.50.180:8888   │  (Kodi 14.2)      │
-│  └─────────────┘  ┌─────────────┐ │  /stream                     │  192.168.50.138    │
-│                   │  Docker      │ │                              └───────────────────┘
-│  ┌─────────────┐  │  mjpeg-vnc- │ │                                       │
-│  │  xrdp       │  │  viewer     │ │                                       │  HDMI
-│  │  :3389      │  │  :8888      │ │                                       ▼
-│  └─────────────┘  └─────────────┘ │                                 ┌──────────┐
-└───────────────────────────────────┘                                 │    TV    │
-                                                                      └──────────┘
+  ┌──────────────┐
+  │  VNC Host 1  │──┐
+  └──────────────┘  │
+  ┌──────────────┐  │   VNC        ┌───────────────────┐    MJPEG     ┌───────────────────┐
+  │  VNC Host 2  │──┼─────────────▶│  Docker            │────────────▶│  Apple TV 3       │
+  └──────────────┘  │  :5900 each  │  mjpeg-vnc-viewer  │  /stream    │  (Kodi 14.2)      │
+  ┌──────────────┐  │              │  :8888              │             │  192.168.50.138    │
+  │  VNC Host 3  │──┤              │                     │             └───────────────────┘
+  └──────────────┘  │              │  Composites up to   │                      │
+  ┌──────────────┐  │              │  4 streams into a   │                      │  HDMI
+  │  VNC Host 4  │──┘              │  2×2 grid           │                      ▼
+  └──────────────┘                 └───────────────────┘                 ┌──────────┐
+                                                                        │    TV    │
+                                                                        └──────────┘
 ```
 
-1. **x11vnc** mirrors the xrdp desktop session on the LXC container.
-2. **mjpeg-vnc-viewer** (Docker container) captures VNC frames via asyncvnc, resizes to 720p, encodes as JPEG, and serves an MJPEG stream.
-3. **Kodi** on the Apple TV opens the MJPEG stream URL and displays it fullscreen.
+1. **VNC servers** (x11vnc, etc.) run on up to 4 machines across the network.
+2. **mjpeg-vnc-viewer** (Docker container) connects to each VNC target, captures frames, resizes each to a quarter of the output resolution, composites them into a 2×2 grid, and serves a single MJPEG stream.
+3. **Kodi** on the Apple TV opens the MJPEG stream URL and displays the grid fullscreen.
 
 ## Network
 
 | Host | IP | Ports |
 |------|----|-------|
-| LXC host (Proxmox) | 192.168.50.180 | SSH: 22, VNC: 25900, RDP: 23389, MJPEG: 8888 |
-| LXC container | (via port forwarding) | SSH: 20022, VNC: 5900, RDP: 3389 |
+| MJPEG server (N5095) | 192.168.50.180 | SSH: 22, MJPEG: 8888 |
+| VNC target: RTX3060 | 192.168.50.153 | VNC: 5900 |
+| VNC target: Downstream | 192.168.50.156 | VNC: 5900 |
+| VNC target: N5095 | 192.168.50.180 | VNC: 5900 |
+| VNC target: Colorful | 192.168.50.141 | VNC: 5900 |
 | Apple TV 3 | 192.168.50.138 | SSH: 22, Kodi HTTP: 8080 |
 
 ## Prerequisites
@@ -81,16 +84,18 @@ cd ~/mjpeg-vnc-viewer
 docker compose up --build -d
 ```
 
-Configuration is in `.env`:
+Configuration is in `.env` (see `.env.example`):
 ```env
-VNC_HOST=127.0.0.1
-VNC_PORT=25900
-WIDTH=1280
-HEIGHT=720
+VNC_TARGETS=192.168.50.153:5900:RTX3060:yourpassword,192.168.50.156:5900:Downstream:yourpassword,192.168.50.180:5900:N5095:yourpassword,192.168.50.141:5900:Colorful:yourpassword
+VNC_PASSWORD=            # default password (overridden per-target above)
+WIDTH=1920
+HEIGHT=1080
 MIN_FPS=3
 JPEG_QUALITY=80
 PORT=8888
 ```
+
+`VNC_TARGETS` is a comma-separated list of `host:port:label:password` entries. Port, label, and password are optional (defaults: 5900, hostname, `VNC_PASSWORD`). Empty entries become blank slots. Up to 4 targets are displayed in the 2×2 grid.
 
 ### x11vnc auto-start
 
@@ -192,15 +197,21 @@ docker compose up --build -d     # Rebuild and start
 ## Technical Notes
 
 - **VNC library**: asyncvnc (async Python VNC client). Only supports Raw and ZLib encodings. Works with x11vnc but not TigerVNC (black screen).
-- **FPS**: VNC capture runs at ~8-9 FPS (limited by `client.read()` at ~100ms). MJPEG emission is event-driven — frames are only sent when VNC has a new frame, with a MIN_FPS keepalive to prevent Kodi buffering.
-- **Resize**: VNC native resolution is resized to 1280x720 (BILINEAR) before JPEG encoding. Kodi on Apple TV 3 cannot handle non-720p resolutions.
-- **Overlay**: Bottom-left shows reconnection status when VNC disconnects. Bottom-right has two 4x4 flashing indicators: cyan (MJPEG frame) and magenta (VNC frame).
-- **Fonts**: Uses DejaVu Sans in Docker, macOS Helvetica when running locally. Falls back to Pillow's default bitmap font.
+- **Multi-stream**: Each VNC target runs as an independent async capture task with its own reconnection loop. Frames are composited into a 2×2 grid on every MJPEG emission.
+- **FPS**: VNC capture runs at ~8-9 FPS per stream (limited by `client.read()` at ~100ms). MJPEG emission is event-driven — a frame is sent whenever any VNC stream updates, with a MIN_FPS keepalive to prevent Kodi buffering.
+- **Resize**: Each VNC stream is resized to cell size (WIDTH/2 × HEIGHT/2, BILINEAR) before compositing.
+- **Overlay**: Each cell shows a label bar with a green/red connection status dot. Disconnected cells show a red "Reconnecting" message. Bottom-right of the full canvas has a cyan flashing indicator for MJPEG frames.
+- **Fonts**: Uses DejaVu Sans / DejaVu Sans Bold in Docker, macOS Helvetica when running locally. Falls back to Pillow's default bitmap font.
 - **`asyncio.wait_for()` must NOT be used on VNC reads** — cancelling mid-read corrupts the TCP stream. The server relies on TCP close for disconnect detection.
+- **Memory limit**: Docker container is capped at 256 MB (`mem_limit` in docker-compose.yml).
 - **Apple TV UI**: The Apple TV 3 uses FrontRow/BackRow (not SpringBoard). Only `.frappliance` bundles appear on the home screen.
 - **Kodi Python**: Kodi 14.2 ships its own Python 2.6 for add-ons. Not used here — all processing runs server-side.
 
 ## Files
 
-- `mjpeg_vnc_viewer.py` — The FastAPI MJPEG VNC viewer server (in `~/mjpeg-vnc-viewer/` on LXC host)
+- `mjpeg_vnc_viewer.py` — The FastAPI MJPEG VNC viewer server
+- `docker-compose.yml` — Docker Compose service definition (with 256 MB memory limit)
+- `Dockerfile` — Python 3.12-slim image with DejaVu fonts
+- `.env.example` — Example environment configuration
+- `requirements.txt` — Python dependencies (asyncvnc, FastAPI, Pillow, etc.)
 - `README.md` — This document
