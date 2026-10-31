@@ -9,9 +9,9 @@ import sys
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
 
-def load_targets(spec):
+def load_targets(spec, default_password=""):
     os.environ["VNC_TARGETS"] = spec
-    os.environ.pop("VNC_PASSWORD", None)
+    os.environ["VNC_PASSWORD"] = default_password
     sys.path.insert(0, ROOT)
     try:
         sys.modules.pop("mjpeg_vnc_viewer", None)
@@ -31,5 +31,5 @@ def test_plain_four_field_entry_unchanged():
 
 
 def test_missing_password_falls_back_to_default():
-    t = load_targets("10.0.0.1:5900:lab")[0]
-    assert t["password"] == ""
+    t = load_targets("10.0.0.1:5900:lab", default_password="fallback")[0]
+    assert t["password"] == "fallback"
