@@ -68,7 +68,28 @@ vnc_images: list[Image.Image | None] = [None] * MAX_STREAMS
 vnc_connected: list[bool] = [False] * MAX_STREAMS
 vnc_counters: list[int] = [0] * MAX_STREAMS
 vnc_new_frames: list[asyncio.Event | None] = [None] * MAX_STREAMS
-any_new_frame: asyncio.Event | None = None
+
+
+class _FrameFanout:
+    """One event per MJPEG client: a shared event loses frames when a client clears it."""
+
+    def __init__(self):
+        self._subs: set[asyncio.Event] = set()
+
+    def subscribe(self) -> asyncio.Event:
+        ev = asyncio.Event()
+        self._subs.add(ev)
+        return ev
+
+    def unsubscribe(self, ev: asyncio.Event):
+        self._subs.discard(ev)
+
+    def set(self):
+        for ev in self._subs:
+            ev.set()
+
+
+any_new_frame = _FrameFanout()
 
 mjpeg_counter = 0
 
@@ -194,8 +215,6 @@ async def vnc_capture_task(idx: int):
 # ── FastAPI app ──────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global any_new_frame
-    any_new_frame = asyncio.Event()
     tasks = []
     for i in range(MAX_STREAMS):
         vnc_new_frames[i] = asyncio.Event()
@@ -214,29 +233,33 @@ async def mjpeg_generator():
     keepalive_interval = 1.0 / MIN_FPS
     last_fps_time = time.perf_counter()
     n = 0
-    while True:
-        try:
-            await asyncio.wait_for(any_new_frame.wait(), timeout=keepalive_interval)
-            any_new_frame.clear()
-        except asyncio.TimeoutError:
-            pass
+    new_frame = any_new_frame.subscribe()
+    try:
+        while True:
+            try:
+                await asyncio.wait_for(new_frame.wait(), timeout=keepalive_interval)
+                new_frame.clear()
+            except asyncio.TimeoutError:
+                pass
 
-        frame = get_frame()
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n"
-            b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
-            + frame + b"\r\n"
-        )
+            frame = get_frame()
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n"
+                + frame + b"\r\n"
+            )
 
-        n += 1
-        if n % 100 == 0:
-            now = time.perf_counter()
-            actual_fps = 100 / (now - last_fps_time)
-            connected = sum(1 for c in vnc_connected if c)
-            print(f"[STRM] FPS={actual_fps:.1f}  connected={connected}/{sum(1 for t in VNC_TARGETS if t)}",
-                  flush=True)
-            last_fps_time = now
+            n += 1
+            if n % 100 == 0:
+                now = time.perf_counter()
+                actual_fps = 100 / (now - last_fps_time)
+                connected = sum(1 for c in vnc_connected if c)
+                print(f"[STRM] FPS={actual_fps:.1f}  connected={connected}/{sum(1 for t in VNC_TARGETS if t)}",
+                      flush=True)
+                last_fps_time = now
+    finally:
+        any_new_frame.unsubscribe(new_frame)
 
 
 @app.get("/stream")
