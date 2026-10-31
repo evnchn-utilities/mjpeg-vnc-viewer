@@ -44,7 +44,7 @@ for entry in _raw_targets.split(","):
     host = parts[0]
     port = int(parts[1]) if len(parts) > 1 else 5900
     label = parts[2] if len(parts) > 2 else host
-    password = parts[3] if len(parts) > 3 else VNC_PASSWORD
+    password = ":".join(parts[3:]) if len(parts) > 3 else VNC_PASSWORD
     VNC_TARGETS.append({"host": host, "port": port, "label": label, "password": password})
 # Pad to MAX_STREAMS
 while len(VNC_TARGETS) < MAX_STREAMS:
