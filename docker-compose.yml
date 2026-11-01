@@ -4,6 +4,9 @@ services:
     ports:
       - "${PORT:-8888}:${PORT:-8888}"
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      - PORT=${PORT:-8888}
     restart: unless-stopped
     mem_limit: 256m

@@ -16,4 +16,7 @@ COPY mjpeg_vnc_viewer.py .
 
 EXPOSE 8888
 
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:%s/status' % os.environ.get('PORT', '8888'), timeout=4)"
+
 CMD ["python", "mjpeg_vnc_viewer.py"]
