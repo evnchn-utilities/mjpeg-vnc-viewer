@@ -93,6 +93,7 @@ HEIGHT=1080
 MIN_FPS=3
 JPEG_QUALITY=80
 PORT=8888
+VNC_READ_TIMEOUT=10     # seconds of silence before a host is probed, then again before it is dropped
 ```
 
 `VNC_TARGETS` is a comma-separated list of `host:port:label:password` entries. Port, label, and password are optional (defaults: 5900, hostname, `VNC_PASSWORD`). Empty entries become blank slots. Up to 4 targets are displayed in the 2×2 grid.

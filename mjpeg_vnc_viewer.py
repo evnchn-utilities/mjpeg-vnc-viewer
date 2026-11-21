@@ -24,6 +24,7 @@ HEIGHT = int(os.environ.get("HEIGHT", 720))
 MIN_FPS = int(os.environ.get("MIN_FPS", 3))
 JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", 80))
 PORT = int(os.environ.get("PORT", 8888))
+VNC_READ_TIMEOUT = float(os.environ.get("VNC_READ_TIMEOUT", 10))
 
 MAX_STREAMS = 4
 COLS, ROWS = 2, 2
@@ -167,6 +168,22 @@ def _process_vnc_frame(rgba: np.ndarray) -> Image.Image:
     return img
 
 
+async def _read_or_probe(client):
+    """client.read(), but a host that stays silent through a full refresh request raises TimeoutError.
+
+    An idle desktop legitimately ignores incremental requests, so silence alone
+    proves nothing; a non-incremental request must always be answered.
+    """
+    read = asyncio.ensure_future(client.read())
+    if not (await asyncio.wait({read}, timeout=VNC_READ_TIMEOUT))[0]:
+        v = client.video
+        v.writer.write(b"\x03\x00\x00\x00\x00\x00" + v.width.to_bytes(2, "big") + v.height.to_bytes(2, "big"))
+        if not (await asyncio.wait({read}, timeout=VNC_READ_TIMEOUT))[0]:
+            read.cancel()
+            raise TimeoutError(f"no reply to a full refresh in {VNC_READ_TIMEOUT}s")
+    return read.result()
+
+
 async def vnc_capture_task(idx: int):
     """Continuously capture from one VNC target."""
     target = VNC_TARGETS[idx]
@@ -190,7 +207,7 @@ async def vnc_capture_task(idx: int):
                 client.video.refresh()
                 frame_n = 0
                 while True:
-                    update = await client.read()
+                    update = await _read_or_probe(client)
                     if update is asyncvnc.UpdateType.VIDEO:
                         rgba = client.video.as_rgba()
                         img = await asyncio.to_thread(_process_vnc_frame, rgba)
