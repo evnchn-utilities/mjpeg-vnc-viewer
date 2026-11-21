@@ -2,6 +2,7 @@
 
 An idle-but-alive host must stay connected: it ignores incremental refresh
 requests while nothing changes, but answers a full (non-incremental) one.
+A slow link must not be cut off while a large frame is still arriving.
 """
 
 import asyncio
@@ -17,7 +18,7 @@ mod = importlib.import_module("mjpeg_vnc_viewer")
 W = H = 4
 
 
-async def _fake_rfb(reader, writer, answer_full_refresh):
+async def _fake_rfb(reader, writer, answer_full_refresh, trickle=0.0):
     writer.write(b"RFB 003.008\n")
     await reader.readexactly(12)
     writer.write(b"\x01\x01")  # one auth type: None
@@ -39,21 +40,24 @@ async def _fake_rfb(reader, writer, answer_full_refresh):
                 incremental = (await reader.readexactly(9))[0]
                 if answer_full_refresh and not incremental:
                     writer.write(b"\x00\x00\x00\x01" + b"\x00" * 4
-                                 + W.to_bytes(2, "big") + H.to_bytes(2, "big")
-                                 + b"\x00\x00\x00\x00" + b"\x00" * (W * H * 4))
+                                 + W.to_bytes(2, "big") + H.to_bytes(2, "big") + b"\x00\x00\x00\x00")
+                    for _ in range(W * H * 4 // 8):  # pixels in chunks, `trickle` seconds apart
+                        await asyncio.sleep(trickle)
+                        writer.write(b"\x00" * 8)
             else:
                 return
     except (asyncio.IncompleteReadError, ConnectionError):
         return
 
 
-async def _connected_after(answer_full_refresh, wait):
+async def _connected_after(answer_full_refresh, wait, trickle=0.0):
     server = await asyncio.start_server(
-        lambda r, w: _fake_rfb(r, w, answer_full_refresh), "127.0.0.1", 0)
+        lambda r, w: _fake_rfb(r, w, answer_full_refresh, trickle), "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
     mod.VNC_TARGETS[0] = {"host": "127.0.0.1", "port": port, "label": "t", "password": ""}
     mod.vnc_new_frames[0] = asyncio.Event()
     mod.vnc_connected[0] = False
+    mod.vnc_counters[0] = 0
     task = asyncio.create_task(mod.vnc_capture_task(0))
     try:
         for _ in range(100):  # wait for the first connect
@@ -62,15 +66,24 @@ async def _connected_after(answer_full_refresh, wait):
             await asyncio.sleep(0.02)
         assert mod.vnc_connected[0], "never connected to the fake server"
         await asyncio.sleep(wait)
-        return mod.vnc_connected[0]
+        return mod.vnc_connected[0], mod.vnc_counters[0]
     finally:
         task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
         server.close()
 
 
 def test_silent_host_is_marked_disconnected():
-    assert not asyncio.run(_connected_after(answer_full_refresh=False, wait=1.0))
+    connected, _ = asyncio.run(_connected_after(answer_full_refresh=False, wait=1.0))
+    assert not connected
 
 
 def test_idle_host_that_answers_full_refresh_stays_connected():
-    assert asyncio.run(_connected_after(answer_full_refresh=True, wait=1.5))
+    connected, frames = asyncio.run(_connected_after(answer_full_refresh=True, wait=1.5))
+    assert connected and frames >= 1
+
+
+def test_slow_frame_still_arriving_is_not_cut_off():
+    # 8 chunks 0.15 s apart: each gap is under the 0.3 s timeout, the whole frame takes 1.2 s
+    connected, frames = asyncio.run(_connected_after(answer_full_refresh=True, wait=1.5, trickle=0.15))
+    assert connected and frames >= 1, (connected, frames)

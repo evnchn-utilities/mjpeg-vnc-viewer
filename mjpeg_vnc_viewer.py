@@ -168,20 +168,41 @@ def _process_vnc_frame(rgba: np.ndarray) -> Image.Image:
     return img
 
 
-async def _read_or_probe(client):
+async def _open_tracking_rx(host, port, rx):
+    """asyncio.open_connection that stamps rx[0] whenever any bytes arrive."""
+    reader, writer = await asyncio.open_connection(host, port)
+    feed = reader.feed_data
+
+    def feed_data(data):
+        rx[0] = time.monotonic()
+        feed(data)
+
+    reader.feed_data = feed_data
+    return reader, writer
+
+
+async def _read_or_probe(client, rx):
     """client.read(), but a host that stays silent through a full refresh request raises TimeoutError.
 
     An idle desktop legitimately ignores incremental requests, so silence alone
     proves nothing; a non-incremental request must always be answered.
+    Silence is counted from the last byte received, so a slow large frame is not cut off.
     """
     read = asyncio.ensure_future(client.read())
-    if not (await asyncio.wait({read}, timeout=VNC_READ_TIMEOUT))[0]:
-        v = client.video
-        v.writer.write(b"\x03\x00\x00\x00\x00\x00" + v.width.to_bytes(2, "big") + v.height.to_bytes(2, "big"))
-        if not (await asyncio.wait({read}, timeout=VNC_READ_TIMEOUT))[0]:
-            read.cancel()
-            raise TimeoutError(f"no reply to a full refresh in {VNC_READ_TIMEOUT}s")
-    return read.result()
+    probed = False
+    try:
+        while not (await asyncio.wait({read}, timeout=VNC_READ_TIMEOUT))[0]:
+            if time.monotonic() - rx[0] < VNC_READ_TIMEOUT:
+                probed = False  # bytes still arriving
+            elif probed:
+                raise TimeoutError(f"no reply to a full refresh in {VNC_READ_TIMEOUT}s")
+            else:
+                v = client.video
+                v.writer.write(b"\x03\x00\x00\x00\x00\x00" + v.width.to_bytes(2, "big") + v.height.to_bytes(2, "big"))
+                probed = True
+        return read.result()
+    finally:
+        read.cancel()
 
 
 async def vnc_capture_task(idx: int):
@@ -199,7 +220,9 @@ async def vnc_capture_task(idx: int):
     while True:
         try:
             print(f"[VNC-{idx}] Connecting to {host}:{port} ({label})...", flush=True)
-            async with asyncvnc.connect(host, port, password=password or None) as client:
+            rx = [time.monotonic()]
+            async with asyncvnc.connect(host, port, password=password or None,
+                                        opener=lambda h, p: _open_tracking_rx(h, p, rx)) as client:
                 vnc_connected[idx] = True
                 print(f"[VNC-{idx}] Connected! Desktop: "
                       f"{client.video.width}x{client.video.height}")
@@ -207,7 +230,7 @@ async def vnc_capture_task(idx: int):
                 client.video.refresh()
                 frame_n = 0
                 while True:
-                    update = await _read_or_probe(client)
+                    update = await _read_or_probe(client, rx)
                     if update is asyncvnc.UpdateType.VIDEO:
                         rgba = client.video.as_rgba()
                         img = await asyncio.to_thread(_process_vnc_frame, rgba)
